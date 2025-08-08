@@ -10,4 +10,4 @@ DATASET_NAME = "squad"
 
 DENSE_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 SPARSE_MODEL_NAME = "Qdrant/bm25"
-LATE_INTERACTION_MODEL_NAME = "colbert-ir/colbertv2.0"
+RERANKING_MODEL_NAME = "colbert-ir/colbertv2.0"

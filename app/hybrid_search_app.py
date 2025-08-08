@@ -15,7 +15,7 @@ from qdrant_client.models import (BinaryQuantization, BinaryQuantizationConfig,
 from tqdm import tqdm
 
 from app.config import (COLLECTION_NAME, DATASET_NAME, DENSE_MODEL_NAME, HOST,
-                        LATE_INTERACTION_MODEL_NAME, MAX_DOCUMENTS, PORT,
+                        RERANKING_MODEL_NAME, MAX_DOCUMENTS, PORT,
                         REPLICATION_FACTOR, SHARD_NUMBER, SPARSE_MODEL_NAME,
                         UPSERT_BATCH_SIZE)
 
@@ -55,7 +55,7 @@ def initialize_embedding_models() -> Dict[str, Any]:
     return {
         DENSE_MODEL_NAME: TextEmbedding(DENSE_MODEL_NAME),
         SPARSE_MODEL_NAME: SparseTextEmbedding(SPARSE_MODEL_NAME),
-        LATE_INTERACTION_MODEL_NAME: LateInteractionTextEmbedding(LATE_INTERACTION_MODEL_NAME),
+        RERANKING_MODEL_NAME: LateInteractionTextEmbedding(RERANKING_MODEL_NAME),
     }
 
 
@@ -73,7 +73,7 @@ def generate_embeddings(documents: List[Dict[str, Any]], embedding_models: Dict[
 def setup_qdrant_collection(client: QdrantClient, embedding_models: Dict[str, Any]):
     print(f"Setting up Qdrant collection '{COLLECTION_NAME}'...")
     dense_model = embedding_models[DENSE_MODEL_NAME]
-    late_interaction_model = embedding_models[LATE_INTERACTION_MODEL_NAME]
+    reranking_model = embedding_models[RERANKING_MODEL_NAME]
 
     client.recreate_collection(
         collection_name=COLLECTION_NAME,
@@ -83,8 +83,8 @@ def setup_qdrant_collection(client: QdrantClient, embedding_models: Dict[str, An
                 distance=Distance.COSINE,
                 quantization_config=BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True)),
             ),
-            LATE_INTERACTION_MODEL_NAME: VectorParams(
-                size=late_interaction_model.embedding_size,
+            RERANKING_MODEL_NAME: VectorParams(
+                size=reranking_model.embedding_size,
                 distance=Distance.COSINE,
                 multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
                 hnsw_config=HnswConfigDiff(m=0),  # Disable HNSW for this vector
@@ -104,7 +104,7 @@ def _create_point(doc: Dict, embeddings: Dict, index: int) -> PointStruct:
         vector={
             DENSE_MODEL_NAME: embeddings[DENSE_MODEL_NAME][index],
             SPARSE_MODEL_NAME: embeddings[SPARSE_MODEL_NAME][index].as_object(),
-            LATE_INTERACTION_MODEL_NAME: embeddings[LATE_INTERACTION_MODEL_NAME][index],
+            RERANKING_MODEL_NAME: embeddings[RERANKING_MODEL_NAME][index],
         },
         payload={"text": doc["text"], **doc["metadata"]},
     )
@@ -124,7 +124,7 @@ def index_to_qdrant(client: QdrantClient, documents: List[Dict[str, Any]], embed
 def hybrid_search_with_reranking(query: str, embedding_models: Dict[str, Any], client: QdrantClient, limit: int = 10):
     dense_query = next(embedding_models[DENSE_MODEL_NAME].query_embed(query))
     sparse_query = next(embedding_models[SPARSE_MODEL_NAME].query_embed(query))
-    late_query = next(embedding_models[LATE_INTERACTION_MODEL_NAME].query_embed(query))
+    late_query = next(embedding_models[RERANKING_MODEL_NAME].query_embed(query))
 
     prefetch = [
         Prefetch(query=dense_query, using=DENSE_MODEL_NAME, limit=20),
@@ -132,7 +132,7 @@ def hybrid_search_with_reranking(query: str, embedding_models: Dict[str, Any], c
     ]
 
     results = client.query_points(
-        collection_name=COLLECTION_NAME, prefetch=prefetch, query=late_query, using=LATE_INTERACTION_MODEL_NAME, with_payload=True, limit=limit
+        collection_name=COLLECTION_NAME, prefetch=prefetch, query=late_query, using=RERANKING_MODEL_NAME, with_payload=True, limit=limit
     )
 
     return results
