@@ -7,22 +7,24 @@ from datasets import load_dataset
 from fastembed import (LateInteractionTextEmbedding, SparseTextEmbedding,
                        TextEmbedding)
 from qdrant_client import QdrantClient
-from qdrant_client.models import (BinaryQuantization, BinaryQuantizationConfig,
-                                  Distance, HnswConfigDiff, Modifier,
+from qdrant_client.models import (Batch, BinaryQuantization,
+                                  BinaryQuantizationConfig, Distance,
+                                  HnswConfigDiff, Modifier,
                                   MultiVectorComparator, MultiVectorConfig,
-                                  PointStruct, Prefetch, SparseVector,
+                                  OptimizersConfigDiff, Prefetch, SparseVector,
                                   SparseVectorParams, VectorParams)
 from tqdm import tqdm
 
 from app.config import (COLLECTION_NAME, DATASET_NAME, DENSE_MODEL_NAME, HOST,
-                        RERANKING_MODEL_NAME, MAX_DOCUMENTS, PORT,
-                        REPLICATION_FACTOR, SHARD_NUMBER, SPARSE_MODEL_NAME,
+                        MAX_DOCUMENTS, PORT, REPLICATION_FACTOR,
+                        RERANKING_MODEL_NAME, SHARD_NUMBER, SPARSE_MODEL_NAME,
                         UPSERT_BATCH_SIZE)
 
 
 def load_and_prep_documents(dataset_name: str = DATASET_NAME, max_docs: int = MAX_DOCUMENTS) -> List[Dict[str, Any]]:
     print(f"Loading dataset '{dataset_name}'...")
-    dataset = load_dataset(dataset_name, split="train")
+
+    dataset = load_dataset(dataset_name, split="train", streaming=True)
 
     documents = []
     for i, example in enumerate(dataset):
@@ -87,37 +89,40 @@ def setup_qdrant_collection(client: QdrantClient, embedding_models: Dict[str, An
                 size=reranking_model.embedding_size,
                 distance=Distance.COSINE,
                 multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
-                hnsw_config=HnswConfigDiff(m=0),  # Disable HNSW for this vector
+                hnsw_config=HnswConfigDiff(m=0),
             ),
         },
         sparse_vectors_config={SPARSE_MODEL_NAME: SparseVectorParams(modifier=Modifier.IDF)},
         shard_number=SHARD_NUMBER,
         replication_factor=REPLICATION_FACTOR,
+        optimizers_config=OptimizersConfigDiff(indexing_threshold=0),
     )
     print("Done!\n")
 
 
-def _create_point(doc: Dict, embeddings: Dict, index: int) -> PointStruct:
-
-    return PointStruct(
-        id=int(doc["id"]),
-        vector={
-            DENSE_MODEL_NAME: embeddings[DENSE_MODEL_NAME][index],
-            SPARSE_MODEL_NAME: embeddings[SPARSE_MODEL_NAME][index].as_object(),
-            RERANKING_MODEL_NAME: embeddings[RERANKING_MODEL_NAME][index],
-        },
-        payload={"text": doc["text"], **doc["metadata"]},
-    )
+def finalize_indexing(client: QdrantClient):
+    print("Resuming indexing for the collection...")
+    client.update_collection(collection_name=COLLECTION_NAME, optimizer_config=OptimizersConfigDiff(indexing_threshold=20000))
+    print("Indexing is now active and will build in the background.")
 
 
 def index_to_qdrant(client: QdrantClient, documents: List[Dict[str, Any]], embeddings: Dict[str, List[Any]], batch_size: int = UPSERT_BATCH_SIZE):
     print("Indexing documents into Qdrant...")
+
     for i in tqdm(range(0, len(documents), batch_size), desc="Indexing Batches"):
-        batch_docs = documents[i : i + batch_size]
+        batch_end = i + batch_size
+        batch_docs = documents[i:batch_end]
 
-        points = [_create_point(doc, embeddings, i + doc_idx) for doc_idx, doc in enumerate(batch_docs)]
+        ids = [doc["id"] for doc in batch_docs]
+        payloads = [{"text": doc["text"], **doc["metadata"]} for doc in batch_docs]
 
-        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        vectors = {
+            DENSE_MODEL_NAME: [emb for emb in embeddings[DENSE_MODEL_NAME][i:batch_end]],
+            SPARSE_MODEL_NAME: [emb.as_object() for emb in embeddings[SPARSE_MODEL_NAME][i:batch_end]],
+            RERANKING_MODEL_NAME: [emb for emb in embeddings[RERANKING_MODEL_NAME][i:batch_end]],
+        }
+
+        client.upsert(collection_name=COLLECTION_NAME, points=Batch(ids=ids, vectors=vectors, payloads=payloads))
     print("Done!\n")
 
 
@@ -171,6 +176,7 @@ def setup_and_index(client: QdrantClient, embedding_models: Dict[str, Any]):
     documents = load_and_prep_documents()
     embeddings = generate_embeddings(documents, embedding_models)
     index_to_qdrant(client, documents, embeddings)
+    finalize_indexing(client)
 
 
 def main():
