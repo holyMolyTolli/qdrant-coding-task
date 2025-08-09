@@ -1,132 +1,146 @@
 #!/usr/bin/env python3
 
+import asyncio
+import logging
 import time
-from typing import Any, Dict, List
+from itertools import islice
+from typing import Any, Dict, Generator, List
 
 from datasets import load_dataset
 from fastembed import (LateInteractionTextEmbedding, SparseTextEmbedding,
                        TextEmbedding)
-from qdrant_client import QdrantClient
-from qdrant_client.models import (Batch, BinaryQuantization,
-                                  BinaryQuantizationConfig, Distance,
-                                  HnswConfigDiff, Modifier,
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import (BinaryQuantization, BinaryQuantizationConfig,
+                                  Distance, HnswConfigDiff, Modifier,
                                   MultiVectorComparator, MultiVectorConfig,
-                                  OptimizersConfigDiff, Prefetch, SparseVector,
-                                  SparseVectorParams, VectorParams)
-from tqdm import tqdm
+                                  PointStruct, Prefetch, SparseIndexParams,
+                                  SparseVector, SparseVectorParams,
+                                  VectorParams)
+from tqdm.asyncio import tqdm
 
-from app.config import (COLLECTION_NAME, DATASET_NAME, DENSE_MODEL_NAME, HOST,
-                        MAX_DOCUMENTS, PORT, REPLICATION_FACTOR,
+from app.config import (COLLECTION_NAME, DATASET_NAME, DENSE_MODEL_NAME,
+                        HNSW_M, HOST, MAX_DOCUMENTS, PORT, REPLICATION_FACTOR,
                         RERANKING_MODEL_NAME, SHARD_NUMBER, SPARSE_MODEL_NAME,
                         UPSERT_BATCH_SIZE)
 
-
-def load_and_prep_documents(dataset_name: str = DATASET_NAME, max_docs: int = MAX_DOCUMENTS) -> List[Dict[str, Any]]:
-    print(f"Loading dataset '{dataset_name}'...")
-
-    dataset = load_dataset(dataset_name, split="train", streaming=True)
-
-    documents = []
-    for i, example in enumerate(dataset):
-        if i >= max_docs:
-            break
-        text_content = f"Question: {example['question']} Context: {example['context']}"
-
-        answers = example.get("answers", {})
-        answer_text = answers.get("text", [""])[0] if answers else ""
-
-        documents.append(
-            {
-                "id": i,
-                "text": text_content,
-                "metadata": {
-                    "question": example["question"],
-                    "context": example["context"],
-                    "answer": answer_text,
-                    "title": example.get("title", ""),
-                    "dataset": dataset_name,
-                },
-            }
-        )
-    print(f"Prepared {len(documents)} documents.")
-    return documents
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.getLogger("qdrant_client").setLevel(logging.WARNING)
 
 
 def initialize_embedding_models() -> Dict[str, Any]:
-    print("Initializing embedding models...")
+    logging.info("Initializing embedding models...")
     return {
-        DENSE_MODEL_NAME: TextEmbedding(DENSE_MODEL_NAME),
-        SPARSE_MODEL_NAME: SparseTextEmbedding(SPARSE_MODEL_NAME),
-        RERANKING_MODEL_NAME: LateInteractionTextEmbedding(RERANKING_MODEL_NAME),
+        DENSE_MODEL_NAME: TextEmbedding(DENSE_MODEL_NAME),  # 1.3 seconds
+        SPARSE_MODEL_NAME: SparseTextEmbedding(SPARSE_MODEL_NAME),  # 0.8 seconds
+        RERANKING_MODEL_NAME: LateInteractionTextEmbedding(RERANKING_MODEL_NAME),  # 2.2 seconds
     }
 
 
-def generate_embeddings(documents: List[Dict[str, Any]], embedding_models: Dict[str, Any]) -> Dict[str, List[Any]]:
-    print("Generating embeddings for all documents...")
-    texts = [doc["text"] for doc in documents]
+async def create_or_recreate_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
+    logging.info(f"Checking for existing Qdrant collection '{COLLECTION_NAME}'...")
 
-    embeddings = {}
-    for model_name, model in embedding_models.items():
-        embeddings[model_name] = list(model.embed(texts))
+    if await client.collection_exists(collection_name=COLLECTION_NAME):
+        logging.warning(f"Collection '{COLLECTION_NAME}' already exists. Deleting it.")
+        await client.delete_collection(collection_name=COLLECTION_NAME)
 
-    return embeddings
-
-
-def setup_qdrant_collection(client: QdrantClient, embedding_models: Dict[str, Any]):
-    print(f"Setting up Qdrant collection '{COLLECTION_NAME}'...")
+    logging.info(f"Creating new Qdrant collection '{COLLECTION_NAME}'...")
     dense_model = embedding_models[DENSE_MODEL_NAME]
     reranking_model = embedding_models[RERANKING_MODEL_NAME]
 
-    client.recreate_collection(
+    await client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config={
             DENSE_MODEL_NAME: VectorParams(
                 size=dense_model.embedding_size,
                 distance=Distance.COSINE,
                 quantization_config=BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True)),
+                hnsw_config=HnswConfigDiff(m=0),
+                on_disk=True,
             ),
             RERANKING_MODEL_NAME: VectorParams(
                 size=reranking_model.embedding_size,
                 distance=Distance.COSINE,
                 multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
-                hnsw_config=HnswConfigDiff(m=0),
+                hnsw_config=HnswConfigDiff(m=0),  # Defer HNSW graph construction
+                on_disk=True,
             ),
         },
-        sparse_vectors_config={SPARSE_MODEL_NAME: SparseVectorParams(modifier=Modifier.IDF)},
+        sparse_vectors_config={SPARSE_MODEL_NAME: SparseVectorParams(modifier=Modifier.IDF, index=SparseIndexParams(on_disk=True))},
         shard_number=SHARD_NUMBER,
         replication_factor=REPLICATION_FACTOR,
-        optimizers_config=OptimizersConfigDiff(indexing_threshold=0),
     )
-    print("Done!\n")
 
 
-def finalize_indexing(client: QdrantClient):
-    print("Resuming indexing for the collection...")
-    client.update_collection(collection_name=COLLECTION_NAME, optimizer_config=OptimizersConfigDiff(indexing_threshold=20000))
-    print("Indexing is now active and will build in the background.")
+def stream_and_prep_documents(dataset_name: str = DATASET_NAME, max_docs: int = MAX_DOCUMENTS) -> Generator[Dict[str, Any], None, None]:
+    logging.info(f"Loading and streaming dataset '{dataset_name}'...")
+    dataset = load_dataset(dataset_name, split="train", streaming=True)
 
+    for i, example in enumerate(islice(dataset, max_docs)):
+        text_content = f"Question: {example['question']} Context: {example['context']}"
+        answers = example.get("answers", {})
+        answer_text = answers.get("text", [""])[0] if answers else ""
 
-def index_to_qdrant(client: QdrantClient, documents: List[Dict[str, Any]], embeddings: Dict[str, List[Any]], batch_size: int = UPSERT_BATCH_SIZE):
-    print("Indexing documents into Qdrant...")
-
-    for i in tqdm(range(0, len(documents), batch_size), desc="Indexing Batches"):
-        batch_end = i + batch_size
-        batch_docs = documents[i:batch_end]
-
-        ids = [doc["id"] for doc in batch_docs]
-        payloads = [{"text": doc["text"], **doc["metadata"]} for doc in batch_docs]
-
-        vectors = {
-            DENSE_MODEL_NAME: [emb for emb in embeddings[DENSE_MODEL_NAME][i:batch_end]],
-            SPARSE_MODEL_NAME: [emb.as_object() for emb in embeddings[SPARSE_MODEL_NAME][i:batch_end]],
-            RERANKING_MODEL_NAME: [emb for emb in embeddings[RERANKING_MODEL_NAME][i:batch_end]],
+        yield {
+            "id": i,
+            "text": text_content,
+            "metadata": {
+                "question": example["question"],
+                "context": example["context"],
+                "answer": answer_text,
+                "title": example.get("title", ""),
+                "dataset": dataset_name,
+            },
         }
 
-        client.upsert(collection_name=COLLECTION_NAME, points=Batch(ids=ids, vectors=vectors, payloads=payloads))
-    print("Done!\n")
+
+def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dict[str, Any]], None, None]:
+    while batch := list(islice(generator, batch_size)):
+        yield batch
 
 
-def hybrid_search_with_reranking(query: str, embedding_models: Dict[str, Any], client: QdrantClient, limit: int = 10):
+async def index_documents_to_qdrant(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
+    document_stream = stream_and_prep_documents()
+    batches = batch_generator(document_stream, UPSERT_BATCH_SIZE)
+    num_batches = (MAX_DOCUMENTS + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE
+
+    for batch_docs in tqdm(batches, total=num_batches, desc="Indexing Batches"):
+        texts_to_embed = [doc["text"] for doc in batch_docs]
+
+        start_time = time.time()
+        dense_embeddings = list(embedding_models[DENSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
+        sparse_embeddings = list(embedding_models[SPARSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
+        reranking_embeddings = list(embedding_models[RERANKING_MODEL_NAME].embed(texts_to_embed, parallel=0))
+        logging.info(f"Embedding time: {time.time() - start_time:.2f} seconds")
+
+        points_to_upload = []
+        for i, doc in enumerate(batch_docs):
+
+            points_to_upload.append(
+                PointStruct(
+                    id=doc["id"],
+                    payload={"text": doc["text"], **doc["metadata"]},
+                    vector={
+                        DENSE_MODEL_NAME: dense_embeddings[i],
+                        SPARSE_MODEL_NAME: sparse_embeddings[i].as_object(),
+                        RERANKING_MODEL_NAME: reranking_embeddings[i],
+                    },
+                )
+            )
+
+        start_time = time.time()
+        client.upload_points(collection_name=COLLECTION_NAME, points=points_to_upload, wait=False, parallel=8, batch_size=UPSERT_BATCH_SIZE)
+        logging.info(f"Upload time: {time.time() - start_time:.2f} seconds")
+
+    logging.info(f"✅ Successfully uploaded {MAX_DOCUMENTS} documents.")
+
+
+async def finalize_indexing(client: AsyncQdrantClient):
+    logging.info("Resuming indexing for the collection...")
+    await client.update_collection(collection_name=COLLECTION_NAME, hnsw_config=HnswConfigDiff(m=HNSW_M))
+    logging.info("Indexing is now active and will build in the background.")
+
+
+async def hybrid_search_with_reranking(query: str, embedding_models: Dict[str, Any], client: AsyncQdrantClient, limit: int = 10):
     dense_query = next(embedding_models[DENSE_MODEL_NAME].query_embed(query))
     sparse_query = next(embedding_models[SPARSE_MODEL_NAME].query_embed(query))
     late_query = next(embedding_models[RERANKING_MODEL_NAME].query_embed(query))
@@ -136,14 +150,14 @@ def hybrid_search_with_reranking(query: str, embedding_models: Dict[str, Any], c
         Prefetch(query=SparseVector(**sparse_query.as_object()), using=SPARSE_MODEL_NAME, limit=20),
     ]
 
-    results = client.query_points(
+    results = await client.query_points(
         collection_name=COLLECTION_NAME, prefetch=prefetch, query=late_query, using=RERANKING_MODEL_NAME, with_payload=True, limit=limit
     )
 
     return results
 
 
-def search_examples(client: QdrantClient, embedding_models: Dict[str, Any]):
+async def search_examples(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
     example_queries = [
         "What is the capital of France?",
         "Who wrote Romeo and Juliet?",
@@ -153,39 +167,38 @@ def search_examples(client: QdrantClient, embedding_models: Dict[str, Any]):
     ]
 
     for query in example_queries:
-        print(f"\n{'='*60}")
-        print(f"🔍 Query: {query}")
-        print(f"{'='*60}")
+        logging.info(f"\n{'='*60}")
+        logging.info(f"🔍 Query: {query}")
+        logging.info(f"{'='*60}")
 
         start_time = time.time()
-        results = hybrid_search_with_reranking(query, embedding_models, client, limit=5)
+        results = await hybrid_search_with_reranking(query, embedding_models, client, limit=5)
         search_time = time.time() - start_time
 
-        print(f"⏱️  Search completed in {search_time:.3f} seconds")
-        print(f"📄 Found {len(results.points)} results:")
+        logging.info(f"⏱️  Search completed in {search_time:.3f} seconds")
+        logging.info(f"📄 Found {len(results.points)} results:")
 
         for i, result in enumerate(results.points, 1):
-            print(f"\n{i}. Score: {result.score:.4f}")
-            print(f"   Question: {result.payload.get('question', 'N/A')}")
-            print(f"   Answer: {result.payload.get('answer', 'N/A')}")
-            print(f"   Context: {result.payload.get('context', 'N/A')[:200]}...")
+            logging.info(f"\n{i}. Score: {result.score:.4f}")
+            logging.info(f"   Question: {result.payload.get('question', 'N/A')}")
+            logging.info(f"   Answer: {result.payload.get('answer', 'N/A')}")
+            logging.info(f"   Context: {result.payload.get('context', 'N/A')[:200]}...")
 
 
-def setup_and_index(client: QdrantClient, embedding_models: Dict[str, Any]):
-    setup_qdrant_collection(client, embedding_models)
-    documents = load_and_prep_documents()
-    embeddings = generate_embeddings(documents, embedding_models)
-    index_to_qdrant(client, documents, embeddings)
-    finalize_indexing(client)
+async def setup_and_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
+    await create_or_recreate_collection(client, embedding_models)
+    await index_documents_to_qdrant(client, embedding_models)
+    await finalize_indexing(client)
+    logging.info("Setup and indexing complete")
 
 
-def main():
-    client = QdrantClient(url=f"http://{HOST}:{PORT}")
+async def main():
+    client = AsyncQdrantClient(url=f"http://{HOST}:{PORT}", timeout=600, prefer_grpc=True)
     embedding_models = initialize_embedding_models()
 
-    setup_and_index(client, embedding_models)
-    search_examples(client, embedding_models)
+    await setup_and_index(client, embedding_models)
+    await search_examples(client, embedding_models)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

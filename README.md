@@ -63,7 +63,7 @@ Wait for cluster to be ready at http://localhost:6333
 ### 3. Run Application
 
 ```bash
-python app/hybrid_search_app.py
+python -m app.hybrid_search_app
 ```
 
 ## Configuration
