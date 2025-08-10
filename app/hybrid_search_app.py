@@ -6,6 +6,7 @@ import time
 from itertools import islice
 from typing import Any, Dict, Generator, List
 
+import numpy as np
 from datasets import load_dataset
 from fastembed import (LateInteractionTextEmbedding, SparseTextEmbedding,
                        TextEmbedding)
@@ -25,7 +26,7 @@ from app.config import (BATCH_SIZE, COLLECTION_NAME,
                         PREFETCH_LIMIT, REPLICATION_FACTOR,
                         RERANKING_MODEL_NAME, SHARD_NUMBER, SPARSE_MODEL_NAME)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(lineno)d - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 def initialize_embedding_models() -> Dict[str, Any]:
@@ -81,7 +82,6 @@ async def create_or_recreate_simplified_collection(client: AsyncQdrantClient, em
 
     logging.info(f"Creating new Qdrant collection '{collection_name}'...")
     dense_model = embedding_models[DENSE_MODEL_NAME]
-    # reranking_model = embedding_models[RERANKING_MODEL_NAME]
 
     await client.create_collection(
         collection_name=collection_name,
@@ -92,14 +92,7 @@ async def create_or_recreate_simplified_collection(client: AsyncQdrantClient, em
                 quantization_config=BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True)),
                 hnsw_config=HnswConfigDiff(m=0),
                 on_disk=True,
-            ),
-            # RERANKING_MODEL_NAME: VectorParams(
-            #     size=reranking_model.embedding_size,
-            #     distance=Distance.COSINE,
-            #     multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
-            #     hnsw_config=HnswConfigDiff(m=0),
-            #     on_disk=True,
-            # ),
+            )
         },
         sparse_vectors_config={SPARSE_MODEL_NAME: SparseVectorParams(modifier=Modifier.IDF, index=SparseIndexParams(on_disk=True))},
         shard_number=SHARD_NUMBER,
@@ -124,6 +117,7 @@ def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dic
 
 
 async def index_documents_to_qdrant(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
+    overall_start_time = time.time()
     document_stream = stream_and_prep_documents()
     batches = batch_generator(document_stream, BATCH_SIZE)
     num_batches = (MAX_DOCUMENTS + BATCH_SIZE - 1) // BATCH_SIZE
@@ -156,10 +150,13 @@ async def index_documents_to_qdrant(client: AsyncQdrantClient, embedding_models:
         client.upload_points(collection_name=collection_name, points=points_to_upload, wait=False, parallel=8, batch_size=BATCH_SIZE)
         logging.info(f"Upload time: {time.time() - start_time:.2f} seconds")
 
-    logging.info(f"✅ Successfully uploaded {MAX_DOCUMENTS} documents.")
+    logging.info(
+        f"✅ Successfully uploaded {MAX_DOCUMENTS} large embeddings in {(time.time() - overall_start_time)/MAX_DOCUMENTS:.2f} seconds per document"
+    )
 
 
 async def index_simplified_documents_to_qdrant(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
+    overall_start_time = time.time()
     document_stream = stream_and_prep_documents()
     batches = batch_generator(document_stream, BATCH_SIZE)
     num_batches = (MAX_DOCUMENTS + BATCH_SIZE - 1) // BATCH_SIZE
@@ -170,7 +167,6 @@ async def index_simplified_documents_to_qdrant(client: AsyncQdrantClient, embedd
         start_time = time.time()
         dense_embeddings = list(embedding_models[DENSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
         sparse_embeddings = list(embedding_models[SPARSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
-        # reranking_embeddings = list(embedding_models[RERANKING_MODEL_NAME].embed(texts_to_embed, parallel=0))
         logging.info(f"Embedding time: {time.time() - start_time:.2f} seconds")
 
         points_to_upload = []
@@ -180,11 +176,7 @@ async def index_simplified_documents_to_qdrant(client: AsyncQdrantClient, embedd
                 PointStruct(
                     id=doc["id"],
                     payload={"text": doc["text"], **doc["metadata"]},
-                    vector={
-                        DENSE_MODEL_NAME: dense_embeddings[i],
-                        SPARSE_MODEL_NAME: sparse_embeddings[i].as_object(),
-                        # RERANKING_MODEL_NAME: reranking_embeddings[i],
-                    },
+                    vector={DENSE_MODEL_NAME: dense_embeddings[i], SPARSE_MODEL_NAME: sparse_embeddings[i].as_object()},
                 )
             )
 
@@ -192,7 +184,9 @@ async def index_simplified_documents_to_qdrant(client: AsyncQdrantClient, embedd
         client.upload_points(collection_name=collection_name, points=points_to_upload, wait=False, parallel=8, batch_size=BATCH_SIZE)
         logging.info(f"Upload time: {time.time() - start_time:.2f} seconds")
 
-    logging.info(f"✅ Successfully uploaded {MAX_DOCUMENTS} documents.")
+    logging.info(
+        f"✅ Successfully uploaded {MAX_DOCUMENTS} SIMPLIFIED embeddings in {(time.time() - overall_start_time)/MAX_DOCUMENTS:.2f} seconds per document"
+    )
 
 
 async def finalize_indexing(client: AsyncQdrantClient, collection_name: str):
@@ -225,9 +219,6 @@ async def hybrid_search_with_reranking(
     return [dict(result) for result in results.points]
 
 
-import numpy as np
-
-
 def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1e-8, norms)
@@ -245,22 +236,6 @@ async def simplified_hybrid_search_with_reranking(
     dense_query = next(embedding_models[DENSE_MODEL_NAME].query_embed(query_text))
     sparse_query = next(embedding_models[SPARSE_MODEL_NAME].query_embed(query_text))
     late_query = next(embedding_models[RERANKING_MODEL_NAME].query_embed(query_text))
-
-    # prefetch = [
-    #     Prefetch(query=dense_query, using=DENSE_MODEL_NAME, limit=prefetch_limit),
-    #     Prefetch(query=SparseVector(**sparse_query.as_object()), using=SPARSE_MODEL_NAME, limit=prefetch_limit),
-    # ]
-    # query = FusionQuery(fusion=Fusion.RRF)
-    # prefetch_results = await client.query_points(collection_name=collection_name, prefetch=prefetch, query=query, with_payload=True, limit=prefetch_limit)
-
-    # scored_results = []
-    # for i, (text, doc_embedding) in enumerate(zip(texts_to_embed, reranking_embeddings)):
-    #     similarity_matrix = late_query @ doc_embedding.T
-    #     max_sim_scores = similarity_matrix.max(axis=1)
-    #     final_score = float(max_sim_scores.sum())
-    #     scored_results.append(
-    #         {"text": text, "score": final_score, "id": prefetch_results[i].id, "payload": prefetch_results[i].payload}
-    #     )
 
     prefetch_results_dense = await client.query_points(
         collection_name=collection_name, query=dense_query, with_payload=True, limit=prefetch_limit, using=DENSE_MODEL_NAME
@@ -295,82 +270,155 @@ async def simplified_hybrid_search_with_reranking(
     return results
 
 
+# async def search_examples(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
+#     example_queries = [
+#         "What is the capital of France?",
+#         "Who wrote Romeo and Juliet?",
+#         "What is the largest planet in our solar system?",
+#         "When was the Declaration of Independence signed?",
+#         "What is the chemical symbol for gold?",
+#     ]
+
+#     non_matching_results = []
+#     average_search_time = 0
+#     average_simplified_search_time = 0
+#     for query_text in example_queries:
+#         logging.info(f"{'='*60}")
+#         logging.info(f"🔍 Query: {query_text}")
+#         logging.info(f"{'='*60}")
+
+#         start_time = time.time()
+#         results = await hybrid_search_with_reranking(query_text, embedding_models, client, COLLECTION_NAME, limit=5)
+#         search_time = time.time() - start_time
+
+#         logging.info(f"{'-'*30}")
+#         logging.info(f"⏱️  Search completed in {search_time:.3f} seconds")
+#         logging.info(f"{'-'*30}")
+
+#         for i, result in enumerate(results, 1):
+#             logging.info(f"{i}. Score: {result['score']:.4f}")
+#             logging.info(f"   Question: {result['payload'].get('question', 'N/A')}")
+#             logging.info(f"   Answer: {result['payload'].get('answer', 'N/A')}")
+
+#         average_search_time += search_time
+
+#         start_time = time.time()
+#         simplified_results = await simplified_hybrid_search_with_reranking(query_text, embedding_models, client, COLLECTION_NAME_SIMPLIFIED, limit=5)
+#         search_time = time.time() - start_time
+
+#         logging.info(f"{'-'*30}")
+#         logging.info(f"⏱️  Simplified search completed in {search_time:.3f} seconds")
+#         logging.info(f"{'-'*30}")
+
+#         for i, result in enumerate(simplified_results, 1):
+#             logging.info(f"{i}. Score: {result['score']:.4f}")
+#             logging.info(f"   Question: {result['payload'].get('question', 'N/A')}")
+#             logging.info(f"   Answer: {result['payload'].get('answer', 'N/A')}")
+
+#         average_simplified_search_time += search_time
+
+#         # compare results between normal and simplified search
+#         for i, result in enumerate(results):
+#             if result["id"] != simplified_results[i]["id"]:
+#                 non_matching_results.append({"query": query_text, "rank": i, "normal_result": result, "simplified_result": simplified_results[i]})
+
+#     logging.info(f"{'='*60}")
+#     logging.info("Comparison of search times between normal and simplified search")
+#     logging.info(f"{'='*60}")
+#     logging.info(f"Average search time: {average_search_time / len(example_queries):.3f} seconds")
+#     logging.info(f"Average simplified search time: {average_simplified_search_time / len(example_queries):.3f} seconds")
+
+#     logging.info(f"{'='*60}")
+#     logging.info("Comparison of results between normal and simplified search")
+#     logging.info(f"{'='*60}")
+#     if len(non_matching_results) > 0:
+#         logging.info(f"{len(non_matching_results)} non-matching results")
+#         current_query = None
+#         for result in non_matching_results:
+#             if current_query != result["query"]:
+#                 current_query = result["query"]
+#                 logging.info(f"{'-'*60}")
+#                 logging.info(f"Query: {result['query']}")
+#                 logging.info(f"{'-'*60}")
+#             logging.info(f"   Rank:              {result['rank']}")
+#             logging.info(f"   Normal result:     {result['normal_result']['payload']['question']}")
+#             logging.info(f"   Simplified result: {result['simplified_result']['payload']['question']}")
+#             logging.info(f"   {'-'*60}")
+#     else:
+#         logging.info("All results match")
+
+
+# --- Helper Functions for Logging ---
+
+
+def _log_search_results(title: str, results: List[Dict[str, Any]], search_time: float):
+    """Logs the title, time, and formatted results of a search."""
+    logging.info(f"\n--- {title} (took {search_time:.3f}s) ---")
+    if not results:
+        logging.info("  No results found.")
+        return
+    for i, result in enumerate(results, 1):
+        score = result.get("score", 0.0)
+        question = result.get("payload", {}).get("question", "N/A")
+        result.get("payload", {}).get("answer", "N/A")
+        logging.info(f"  {i}. Score: {score:<6.4f} | Q: {question}")
+
+
+def _log_summary(total_time: float, total_simplified_time: float, non_matching_results: List[Dict], query_count: int):
+    """Logs the final summary report comparing the two search methods."""
+    logging.info("=" * 60)
+    logging.info("📊 FINAL SUMMARY")
+    logging.info("=" * 60)
+
+    logging.info("Average Search Times:")
+    logging.info(f"  - Normal:     {total_time / query_count:.3f} seconds")
+    logging.info(f"  - Simplified: {total_simplified_time / query_count:.3f} seconds")
+    logging.info("-" * 60)
+
+    logging.info("Result Comparison:")
+    if not non_matching_results:
+        logging.info("  ✅ All results match.")
+        return
+
+    logging.warning(f"  ⚠️ Found {len(non_matching_results)} non-matching results:")
+    current_query = None
+    for result in non_matching_results:
+        if current_query != result["query"]:
+            current_query = result["query"]
+            logging.info(f"Query: '{current_query}'")
+
+        logging.info(f"    - Rank {result['rank']+1}:")
+        logging.info(f"        Normal:     (ID: {result['normal_result']['id']}) {result['normal_result']['payload']['question']}")
+        logging.info(f"        Simplified: (ID: {result['simplified_result']['id']}) {result['simplified_result']['payload']['question']}")
+
+
 async def search_examples(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
-    example_queries = [
-        "What is the capital of France?",
-        "Who wrote Romeo and Juliet?",
-        "What is the largest planet in our solar system?",
-        "When was the Declaration of Independence signed?",
-        "What is the chemical symbol for gold?",
-    ]
+    example_queries = ["What is the capital of France?", "Who wrote Romeo and Juliet?", "What is the largest planet in our solar system?"]
 
     non_matching_results = []
-    average_search_time = 0
-    average_simplified_search_time = 0
+    total_search_time = 0
+    total_simplified_search_time = 0
+
     for query_text in example_queries:
-        logging.info(f"{'='*60}")
-        logging.info(f"🔍 Query: {query_text}")
-        logging.info(f"{'='*60}")
+        logging.info(f"\n{'='*25} 🔍 Query: {query_text} {'='*25}")
 
         start_time = time.time()
         results = await hybrid_search_with_reranking(query_text, embedding_models, client, COLLECTION_NAME, limit=5)
         search_time = time.time() - start_time
-
-        logging.info(f"{'-'*30}")
-        logging.info(f"⏱️  Search completed in {search_time:.3f} seconds")
-        logging.info(f"{'-'*30}")
-
-        for i, result in enumerate(results, 1):
-            logging.info(f"{i}. Score: {result['score']:.4f}")
-            logging.info(f"   Question: {result['payload'].get('question', 'N/A')}")
-            logging.info(f"   Answer: {result['payload'].get('answer', 'N/A')}")
-
-        average_search_time += search_time
+        total_search_time += search_time
+        _log_search_results("Normal Search Results", results, search_time)
 
         start_time = time.time()
         simplified_results = await simplified_hybrid_search_with_reranking(query_text, embedding_models, client, COLLECTION_NAME_SIMPLIFIED, limit=5)
-        search_time = time.time() - start_time
+        simplified_search_time = time.time() - start_time
+        total_simplified_search_time += simplified_search_time
+        _log_search_results("Simplified Search Results", simplified_results, simplified_search_time)
 
-        logging.info(f"{'-'*30}")
-        logging.info(f"⏱️  Simplified search completed in {search_time:.3f} seconds")
-        logging.info(f"{'-'*30}")
+        for i, (res_norm, res_simp) in enumerate(zip(results, simplified_results)):
+            if res_norm["id"] != res_simp["id"]:
+                non_matching_results.append({"query": query_text, "rank": i, "normal_result": res_norm, "simplified_result": res_simp})
 
-        for i, result in enumerate(simplified_results, 1):
-            logging.info(f"{i}. Score: {result['score']:.4f}")
-            logging.info(f"   Question: {result['payload'].get('question', 'N/A')}")
-            logging.info(f"   Answer: {result['payload'].get('answer', 'N/A')}")
-
-        average_simplified_search_time += search_time
-
-        # compare results between normal and simplified search
-        for i, result in enumerate(results):
-            if result["id"] != simplified_results[i]["id"]:
-                non_matching_results.append({"query": query_text, "rank": i, "normal_result": result, "simplified_result": simplified_results[i]})
-
-    logging.info(f"{'='*60}")
-    logging.info("Comparison of search times between normal and simplified search")
-    logging.info(f"{'='*60}")
-    logging.info(f"Average search time: {average_search_time / len(example_queries):.3f} seconds")
-    logging.info(f"Average simplified search time: {average_simplified_search_time / len(example_queries):.3f} seconds")
-
-    logging.info(f"{'='*60}")
-    logging.info("Comparison of results between normal and simplified search")
-    logging.info(f"{'='*60}")
-    if len(non_matching_results) > 0:
-        logging.info(f"{len(non_matching_results)} non-matching results")
-        current_query = None
-        for result in non_matching_results:
-            if current_query != result["query"]:
-                current_query = result["query"]
-                logging.info(f"{'-'*60}")
-                logging.info(f"Query: {result['query']}")
-                logging.info(f"{'-'*60}")
-            logging.info(f"   Rank:              {result['rank']}")
-            logging.info(f"   Normal result:     {result['normal_result']['payload']['question']}")
-            logging.info(f"   Simplified result: {result['simplified_result']['payload']['question']}")
-            logging.info(f"   {'-'*60}")
-    else:
-        logging.info("All results match")
+    _log_summary(total_search_time, total_simplified_search_time, non_matching_results, len(example_queries))
 
 
 async def setup_and_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
