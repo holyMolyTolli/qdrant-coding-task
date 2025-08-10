@@ -7,9 +7,6 @@ services:
       - "6333:6333"
       - "6334:6334"
       - "6335:6335"
-    # volumes:
-    #   - ./qdrant-data/node-1:/qdrant/storage
-    #   - ./config.yaml:/qdrant/config/config.yaml
     environment:
       QDRANT__CLUSTER__ENABLED: "true"
     command: ["./qdrant", "--uri", "http://qdrant-node-1:6335"]
@@ -23,9 +20,6 @@ services:
       - "16333:6333"
       - "16334:6334"
       - "16335:6335"
-    # volumes:
-    #   - ./qdrant-data/node-2:/qdrant/storage
-    #   - ./config.yaml:/qdrant/config/config.yaml
     environment:
       QDRANT__CLUSTER__ENABLED: "true"
     command: ["./qdrant", "--bootstrap", "http://qdrant-node-1:6335"]
