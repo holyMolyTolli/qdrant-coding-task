@@ -152,10 +152,24 @@ async def native_hybrid_search_with_reranking(
     return [dict(result) for result in results.points]
 
 
-def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1e-8, norms)
     return vectors / norms
+
+
+def _rerank_candidates(candidates: List[Dict[str, Any]], query_text: str, reranking_model: Any):
+    texts_to_embed = [result.payload["text"] for result in candidates]
+    reranking_embeddings = list(reranking_model.embed(texts_to_embed, parallel=0))
+    normalized_query = _normalize_vectors(next(reranking_model.query_embed(query_text)))
+    scored_results = []
+    for i, (text, doc_embedding) in enumerate(zip(texts_to_embed, reranking_embeddings)):
+        normalized_doc = _normalize_vectors(doc_embedding)
+        similarity_matrix = normalized_query @ normalized_doc.T
+        max_sim_scores = similarity_matrix.max(axis=1)
+        final_score = float(max_sim_scores.sum())
+        scored_results.append({"text": text, "score": final_score, "id": candidates[i].id, "payload": unique_candidates[i].payload})
+    return scored_results
 
 
 async def manual_hybrid_search_with_reranking(
@@ -168,7 +182,6 @@ async def manual_hybrid_search_with_reranking(
 ):
     dense_query = next(embedding_models[DENSE_MODEL_NAME].query_embed(query_text))
     sparse_query = next(embedding_models[SPARSE_MODEL_NAME].query_embed(query_text))
-    late_query = next(embedding_models[RERANKING_MODEL_NAME].query_embed(query_text))
 
     prefetch_results_dense = await client.query_points(
         collection_name=collection_name, query=dense_query, with_payload=True, limit=prefetch_limit, using=DENSE_MODEL_NAME
@@ -181,26 +194,15 @@ async def manual_hybrid_search_with_reranking(
         using=SPARSE_MODEL_NAME,
     )
 
-    prefetch_results = prefetch_results_dense.points
+    unique_candidates = prefetch_results_dense.points
     for point in prefetch_results_sparse.points:
-        if point.id not in [p.id for p in prefetch_results]:
-            prefetch_results.append(point)
+        if point.id not in [p.id for p in unique_candidates]:
+            unique_candidates.append(point)
 
-    texts_to_embed = [result.payload["text"] for result in prefetch_results]
-    reranking_embeddings = list(embedding_models[RERANKING_MODEL_NAME].embed(texts_to_embed, parallel=0))
+    reranking_model = embedding_models[RERANKING_MODEL_NAME]
+    scored_results = _rerank_candidates(unique_candidates, query_text, reranking_model)
 
-    scored_results = []
-    for i, (text, doc_embedding) in enumerate(zip(texts_to_embed, reranking_embeddings)):
-        normalized_query = normalize_vectors(late_query)
-        normalized_doc = normalize_vectors(doc_embedding)
-        similarity_matrix = normalized_query @ normalized_doc.T
-        max_sim_scores = similarity_matrix.max(axis=1)
-        final_score = float(max_sim_scores.sum())
-        scored_results.append({"text": text, "score": final_score, "id": prefetch_results[i].id, "payload": prefetch_results[i].payload})
-
-    results = sorted(scored_results, key=lambda x: x["score"], reverse=True)[:limit]
-
-    return results
+    return sorted(scored_results, key=lambda x: x["score"], reverse=True)[:limit]
 
 
 # --- Helper Functions for logger ---
