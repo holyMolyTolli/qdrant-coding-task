@@ -120,7 +120,7 @@ def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dic
         yield batch
 
 
-async def index_docs_to_reranking_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
+async def index_docs_to_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
     overall_start_time = time.time()
     document_stream = stream_and_prep_documents()
     batches = batch_generator(document_stream, BATCH_SIZE)
@@ -130,22 +130,18 @@ async def index_docs_to_reranking_collection(client: AsyncQdrantClient, embeddin
         texts_to_embed = [doc["text"] for doc in batch_docs]
 
         start_time = time.time()
-        dense_embeddings = list(embedding_models[DENSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
-        sparse_embeddings = list(embedding_models[SPARSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
-        reranking_embeddings = list(embedding_models[RERANKING_MODEL_NAME].embed(texts_to_embed, parallel=0))
+        embeddings = {model_name: list(embedding_model.embed(texts_to_embed, parallel=0)) for model_name, embedding_model in embedding_models.items()}
         logger.info(f"Embedding time: {time.time() - start_time:.2f} seconds")
 
         points_to_upload = []
         for i, doc in enumerate(batch_docs):
-
             points_to_upload.append(
                 PointStruct(
                     id=doc["id"],
                     payload={"text": doc["text"], **doc["metadata"]},
                     vector={
-                        DENSE_MODEL_NAME: dense_embeddings[i],
-                        SPARSE_MODEL_NAME: sparse_embeddings[i].as_object(),
-                        RERANKING_MODEL_NAME: reranking_embeddings[i],
+                        model_name: embedding[i].as_object() if model_name == SPARSE_MODEL_NAME else embedding[i]
+                        for model_name, embedding in embeddings.items()
                     },
                 )
             )
@@ -156,43 +152,10 @@ async def index_docs_to_reranking_collection(client: AsyncQdrantClient, embeddin
 
     total_duration = time.time() - overall_start_time
     logger.info(
-        f"✅ Successfully uploaded {MAX_DOCUMENTS} reranking embeddings in {total_duration:.2f} seconds ({total_duration/MAX_DOCUMENTS:.2f} seconds per document)"
+        f"✅ Successfully uploaded {MAX_DOCUMENTS} to {collection_name} in {total_duration:.2f} seconds ({total_duration/MAX_DOCUMENTS:.2f} seconds per document)"
     )
 
 
-async def index_docs_to_hybrid_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
-    overall_start_time = time.time()
-    document_stream = stream_and_prep_documents()
-    batches = batch_generator(document_stream, BATCH_SIZE)
-    num_batches = (MAX_DOCUMENTS + BATCH_SIZE - 1) // BATCH_SIZE
-
-    for batch_docs in tqdm(batches, total=int(num_batches), desc="Indexing Batches"):
-        texts_to_embed = [doc["text"] for doc in batch_docs]
-
-        start_time = time.time()
-        dense_embeddings = list(embedding_models[DENSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
-        sparse_embeddings = list(embedding_models[SPARSE_MODEL_NAME].embed(texts_to_embed, parallel=0))
-        logger.info(f"Embedding time: {time.time() - start_time:.2f} seconds")
-
-        points_to_upload = []
-        for i, doc in enumerate(batch_docs):
-
-            points_to_upload.append(
-                PointStruct(
-                    id=doc["id"],
-                    payload={"text": doc["text"], **doc["metadata"]},
-                    vector={DENSE_MODEL_NAME: dense_embeddings[i], SPARSE_MODEL_NAME: sparse_embeddings[i].as_object()},
-                )
-            )
-
-        start_time = time.time()
-        client.upload_points(collection_name=collection_name, points=points_to_upload, wait=False, parallel=8, batch_size=BATCH_SIZE)
-        logger.info(f"Upload time: {time.time() - start_time:.2f} seconds")
-
-    total_duration = time.time() - overall_start_time
-    logger.info(
-        f"✅ Successfully uploaded {MAX_DOCUMENTS} hybrid embeddings in {total_duration:.2f} seconds ({total_duration/MAX_DOCUMENTS:.2f} seconds per document)"
-    )
 
 
 async def finalize_indexing(client: AsyncQdrantClient, collection_name: str):
@@ -351,14 +314,15 @@ async def search_examples(client: AsyncQdrantClient, embedding_models: Dict[str,
 
 async def build_reranking_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
     await recreate_reranking_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
-    await index_docs_to_reranking_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
+    await index_docs_to_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
     await finalize_indexing(client, RERANKING_COLLECTION_NAME)
     logger.info("Setup and indexing complete")
 
 
 async def build_hybrid_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
-    await recreate_hybrid_collection(client, embedding_models, HYBRID_COLLECTION_NAME)
-    await index_docs_to_hybrid_collection(client, embedding_models, HYBRID_COLLECTION_NAME)
+    hybrid_embedding_models = {DENSE_MODEL_NAME: embedding_models[DENSE_MODEL_NAME], SPARSE_MODEL_NAME: embedding_models[SPARSE_MODEL_NAME]}
+    await recreate_hybrid_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME)
+    await index_docs_to_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME)
     await finalize_indexing(client, HYBRID_COLLECTION_NAME)
     logger.info("Setup and indexing complete")
 
