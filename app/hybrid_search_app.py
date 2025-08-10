@@ -42,7 +42,7 @@ def initialize_embedding_models() -> Dict[str, Any]:
     }
 
 
-async def recreate_reranking_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
+async def recreate_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
     logger.info(f"Checking for existing Qdrant collection '{collection_name}'...")
 
     if await client.collection_exists(collection_name=collection_name):
@@ -50,54 +50,20 @@ async def recreate_reranking_collection(client: AsyncQdrantClient, embedding_mod
         await client.delete_collection(collection_name=collection_name)
 
     logger.info(f"Creating new Qdrant collection '{collection_name}'...")
-    dense_model = embedding_models[DENSE_MODEL_NAME]
-    reranking_model = embedding_models[RERANKING_MODEL_NAME]
+
+    vectors_config = {
+        model_name: VectorParams(size=embedding_model.embedding_size, distance=Distance.COSINE, on_disk=True)
+        for model_name, embedding_model in embedding_models.items()
+        if model_name != SPARSE_MODEL_NAME
+    }
+    vectors_config[DENSE_MODEL_NAME].quantization_config = BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True))
+    if RERANKING_MODEL_NAME in embedding_models:
+        vectors_config[RERANKING_MODEL_NAME].multivector_config = MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM)
+        vectors_config[RERANKING_MODEL_NAME].hnsw_config = HnswConfigDiff(m=0)
 
     await client.create_collection(
         collection_name=collection_name,
-        vectors_config={
-            DENSE_MODEL_NAME: VectorParams(
-                size=dense_model.embedding_size,
-                distance=Distance.COSINE,
-                quantization_config=BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True)),
-                hnsw_config=HnswConfigDiff(m=0),
-                on_disk=True,
-            ),
-            RERANKING_MODEL_NAME: VectorParams(
-                size=reranking_model.embedding_size,
-                distance=Distance.COSINE,
-                multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
-                hnsw_config=HnswConfigDiff(m=0),
-                on_disk=True,
-            ),
-        },
-        sparse_vectors_config={SPARSE_MODEL_NAME: SparseVectorParams(modifier=Modifier.IDF, index=SparseIndexParams(on_disk=True))},
-        shard_number=SHARD_NUMBER,
-        replication_factor=REPLICATION_FACTOR,
-    )
-
-
-async def recreate_hybrid_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str):
-    logger.info(f"Checking for existing Qdrant collection '{collection_name}'...")
-
-    if await client.collection_exists(collection_name=collection_name):
-        logger.warning(f"Collection '{collection_name}' already exists. Deleting it.")
-        await client.delete_collection(collection_name=collection_name)
-
-    logger.info(f"Creating new Qdrant collection '{collection_name}'...")
-    dense_model = embedding_models[DENSE_MODEL_NAME]
-
-    await client.create_collection(
-        collection_name=collection_name,
-        vectors_config={
-            DENSE_MODEL_NAME: VectorParams(
-                size=dense_model.embedding_size,
-                distance=Distance.COSINE,
-                quantization_config=BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True)),
-                hnsw_config=HnswConfigDiff(m=0),
-                on_disk=True,
-            )
-        },
+        vectors_config=vectors_config,
         sparse_vectors_config={SPARSE_MODEL_NAME: SparseVectorParams(modifier=Modifier.IDF, index=SparseIndexParams(on_disk=True))},
         shard_number=SHARD_NUMBER,
         replication_factor=REPLICATION_FACTOR,
@@ -154,8 +120,6 @@ async def index_docs_to_collection(client: AsyncQdrantClient, embedding_models: 
     logger.info(
         f"✅ Successfully uploaded {MAX_DOCUMENTS} to {collection_name} in {total_duration:.2f} seconds ({total_duration/MAX_DOCUMENTS:.2f} seconds per document)"
     )
-
-
 
 
 async def finalize_indexing(client: AsyncQdrantClient, collection_name: str):
@@ -313,7 +277,7 @@ async def search_examples(client: AsyncQdrantClient, embedding_models: Dict[str,
 
 
 async def build_reranking_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
-    await recreate_reranking_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
+    await recreate_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
     await index_docs_to_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
     await finalize_indexing(client, RERANKING_COLLECTION_NAME)
     logger.info("Setup and indexing complete")
@@ -321,7 +285,7 @@ async def build_reranking_search_index(client: AsyncQdrantClient, embedding_mode
 
 async def build_hybrid_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
     hybrid_embedding_models = {DENSE_MODEL_NAME: embedding_models[DENSE_MODEL_NAME], SPARSE_MODEL_NAME: embedding_models[SPARSE_MODEL_NAME]}
-    await recreate_hybrid_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME)
+    await recreate_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME)
     await index_docs_to_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME)
     await finalize_indexing(client, HYBRID_COLLECTION_NAME)
     logger.info("Setup and indexing complete")
