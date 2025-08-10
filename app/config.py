@@ -1,16 +1,19 @@
 HOST = "localhost"
 PORT = 6333
-COLLECTION_NAME = "hybrid-search"
-UPSERT_BATCH_SIZE = 128  # 128
-SHARD_NUMBER = 3
-REPLICATION_FACTOR = 2
 
-MAX_DOCUMENTS = 1280  # 1280
+
+COLLECTION_NAME = "hybrid-search"
+BATCH_SIZE = int(128 / 2)
+REPLICATION_FACTOR = 2
+SHARD_NUMBER = REPLICATION_FACTOR * 2
+
+MAX_DOCUMENTS = BATCH_SIZE * 2
 DATASET_NAME = "squad"
 # DATASET_NAME = "Qdrant/arxiv-titles-instructorxl-embeddings"
 
 DENSE_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 SPARSE_MODEL_NAME = "Qdrant/bm25"
-RERANKING_MODEL_NAME = "colbert-ir/colbertv2.0"
+# RERANKING_MODEL_NAME = "colbert-ir/colbertv2.0" # 1.2GB model
+RERANKING_MODEL_NAME = "answerdotai/answerai-colbert-small-v1"  # 130MB model
 
 HNSW_M = 16

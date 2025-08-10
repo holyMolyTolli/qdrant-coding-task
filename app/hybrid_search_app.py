@@ -18,10 +18,10 @@ from qdrant_client.models import (BinaryQuantization, BinaryQuantizationConfig,
                                   VectorParams)
 from tqdm.asyncio import tqdm
 
-from app.config import (COLLECTION_NAME, DATASET_NAME, DENSE_MODEL_NAME,
-                        HNSW_M, HOST, MAX_DOCUMENTS, PORT, REPLICATION_FACTOR,
-                        RERANKING_MODEL_NAME, SHARD_NUMBER, SPARSE_MODEL_NAME,
-                        UPSERT_BATCH_SIZE)
+from app.config import (BATCH_SIZE, COLLECTION_NAME, DATASET_NAME,
+                        DENSE_MODEL_NAME, HNSW_M, HOST, MAX_DOCUMENTS, PORT,
+                        REPLICATION_FACTOR, RERANKING_MODEL_NAME, SHARD_NUMBER,
+                        SPARSE_MODEL_NAME)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logging.getLogger("qdrant_client").setLevel(logging.WARNING)
@@ -30,9 +30,9 @@ logging.getLogger("qdrant_client").setLevel(logging.WARNING)
 def initialize_embedding_models() -> Dict[str, Any]:
     logging.info("Initializing embedding models...")
     return {
-        DENSE_MODEL_NAME: TextEmbedding(DENSE_MODEL_NAME),  # 1.3 seconds
-        SPARSE_MODEL_NAME: SparseTextEmbedding(SPARSE_MODEL_NAME),  # 0.8 seconds
-        RERANKING_MODEL_NAME: LateInteractionTextEmbedding(RERANKING_MODEL_NAME),  # 2.2 seconds
+        DENSE_MODEL_NAME: TextEmbedding(DENSE_MODEL_NAME),
+        SPARSE_MODEL_NAME: SparseTextEmbedding(SPARSE_MODEL_NAME),
+        RERANKING_MODEL_NAME: LateInteractionTextEmbedding(RERANKING_MODEL_NAME),
     }
 
 
@@ -61,7 +61,7 @@ async def create_or_recreate_collection(client: AsyncQdrantClient, embedding_mod
                 size=reranking_model.embedding_size,
                 distance=Distance.COSINE,
                 multivector_config=MultiVectorConfig(comparator=MultiVectorComparator.MAX_SIM),
-                hnsw_config=HnswConfigDiff(m=0),  # Defer HNSW graph construction
+                hnsw_config=HnswConfigDiff(m=0),
                 on_disk=True,
             ),
         },
@@ -76,21 +76,10 @@ def stream_and_prep_documents(dataset_name: str = DATASET_NAME, max_docs: int = 
     dataset = load_dataset(dataset_name, split="train", streaming=True)
 
     for i, example in enumerate(islice(dataset, max_docs)):
-        text_content = f"Question: {example['question']} Context: {example['context']}"
-        answers = example.get("answers", {})
-        answer_text = answers.get("text", [""])[0] if answers else ""
+        answer_text = " | ".join(example.get("answers", {}).get("text", [""]))
+        text_content = f"Question: {example['question']} Answer: {answer_text}"
 
-        yield {
-            "id": i,
-            "text": text_content,
-            "metadata": {
-                "question": example["question"],
-                "context": example["context"],
-                "answer": answer_text,
-                "title": example.get("title", ""),
-                "dataset": dataset_name,
-            },
-        }
+        yield {"id": i, "text": text_content, "metadata": {"question": example["question"], "answer": answer_text, "dataset": dataset_name}}
 
 
 def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dict[str, Any]], None, None]:
@@ -100,10 +89,10 @@ def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dic
 
 async def index_documents_to_qdrant(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
     document_stream = stream_and_prep_documents()
-    batches = batch_generator(document_stream, UPSERT_BATCH_SIZE)
-    num_batches = (MAX_DOCUMENTS + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE
+    batches = batch_generator(document_stream, BATCH_SIZE)
+    num_batches = (MAX_DOCUMENTS + BATCH_SIZE - 1) // BATCH_SIZE
 
-    for batch_docs in tqdm(batches, total=num_batches, desc="Indexing Batches"):
+    for batch_docs in tqdm(batches, total=int(num_batches), desc="Indexing Batches"):
         texts_to_embed = [doc["text"] for doc in batch_docs]
 
         start_time = time.time()
@@ -128,7 +117,7 @@ async def index_documents_to_qdrant(client: AsyncQdrantClient, embedding_models:
             )
 
         start_time = time.time()
-        client.upload_points(collection_name=COLLECTION_NAME, points=points_to_upload, wait=False, parallel=8, batch_size=UPSERT_BATCH_SIZE)
+        client.upload_points(collection_name=COLLECTION_NAME, points=points_to_upload, wait=False, parallel=8, batch_size=BATCH_SIZE)
         logging.info(f"Upload time: {time.time() - start_time:.2f} seconds")
 
     logging.info(f"✅ Successfully uploaded {MAX_DOCUMENTS} documents.")
@@ -182,7 +171,6 @@ async def search_examples(client: AsyncQdrantClient, embedding_models: Dict[str,
             logging.info(f"\n{i}. Score: {result.score:.4f}")
             logging.info(f"   Question: {result.payload.get('question', 'N/A')}")
             logging.info(f"   Answer: {result.payload.get('answer', 'N/A')}")
-            logging.info(f"   Context: {result.payload.get('context', 'N/A')[:200]}...")
 
 
 async def setup_and_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
