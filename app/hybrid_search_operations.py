@@ -120,7 +120,7 @@ async def finalize_indexing(client: AsyncQdrantClient, collection_name: str):
     logger.info("Indexing is now active and will build in the background.")
 
 
-async def native_hybrid_search_with_reranking(
+async def hybrid_search_with_native_reranking(
     query_text: str, embedding_models: Dict[str, Any], client: AsyncQdrantClient, collection_name: str, limit: int, prefetch_limit: int
 ):
     dense_query = next(embedding_models[DENSE_MODEL_NAME].query_embed(query_text))
@@ -159,9 +159,14 @@ def _rerank_candidates(candidates: List[Dict[str, Any]], query_text: str, rerank
     return scored_results
 
 
-async def manual_hybrid_search_with_reranking(
+async def hybrid_search_with_manual_reranking(
     query_text: str, embedding_models: Dict[str, Any], client: AsyncQdrantClient, collection_name: str, limit: int, prefetch_limit: int
 ):
+    # Manually replicating the native two-stage search to reproduce its results.
+    # We fetch candidates from dense and sparse searches first, then rerank them,
+    # trying to mimic the `prefetch` logic in `hybrid_search_with_native_reranking`.
+    # This is intentionally different from a single-stage `FusionQuery` (RRF).
+
     dense_query = next(embedding_models[DENSE_MODEL_NAME].query_embed(query_text))
     sparse_query = next(embedding_models[SPARSE_MODEL_NAME].query_embed(query_text))
 

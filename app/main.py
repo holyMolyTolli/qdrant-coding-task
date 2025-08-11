@@ -15,9 +15,9 @@ from app.config import (BATCH_SIZE, DENSE_MODEL_NAME, HOST,
                         PREFETCH_LIMIT, RERANKING_COLLECTION_NAME,
                         RERANKING_MODEL_NAME, SPARSE_MODEL_NAME)
 from app.hybrid_search_operations import (finalize_indexing,
+                                          hybrid_search_with_manual_reranking,
+                                          hybrid_search_with_native_reranking,
                                           index_docs_to_collection,
-                                          manual_hybrid_search_with_reranking,
-                                          native_hybrid_search_with_reranking,
                                           recreate_collection)
 
 logger = logging.getLogger(__file__.split("/")[-1].split(".")[0])
@@ -100,7 +100,7 @@ async def search_and_compare(client: AsyncQdrantClient, embedding_models: Dict[s
         logger.info(f"\n{'='*25} 🔍 Query: {query_text} {'='*25}")
 
         start_time = time.time()
-        native_results = await native_hybrid_search_with_reranking(
+        native_results = await hybrid_search_with_native_reranking(
             query_text, embedding_models, client, RERANKING_COLLECTION_NAME, limit=5, prefetch_limit=PREFETCH_LIMIT
         )
         native_search_time = time.time() - start_time
@@ -108,7 +108,7 @@ async def search_and_compare(client: AsyncQdrantClient, embedding_models: Dict[s
         _log_search_results("Native Search Results", native_results, native_search_time)
 
         start_time = time.time()
-        manual_results = await manual_hybrid_search_with_reranking(
+        manual_results = await hybrid_search_with_manual_reranking(
             query_text, embedding_models, client, HYBRID_COLLECTION_NAME, limit=5, prefetch_limit=PREFETCH_LIMIT
         )
         manual_search_time = time.time() - start_time

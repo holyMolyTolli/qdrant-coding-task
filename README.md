@@ -77,7 +77,7 @@ python -m app.main
 
 *   `app/main.py`: Main script to build indexes and run the search comparison.
 *   `app/hybrid_search_operations.py`: Contains the core logic for both search approaches:
-    *   `native_hybrid_search_with_reranking()`
-    *   `manual_hybrid_search_with_reranking()`
+    *   `hybrid_search_with_native_reranking()`
+    *   `hybrid_search_with_manual_reranking()`
 *   `app/config.py`: Configuration for models, dataset, and cluster settings.
 *   `docker-compose.yml`: Defines the 2-node Qdrant cluster.
