@@ -27,9 +27,6 @@ console_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(
 logger.addHandler(console_handler)
 
 
-# --- Helper Functions for logger ---
-
-
 def initialize_embedding_models() -> Dict[str, Any]:
     logger.info("Initializing embedding models...")
     return {
