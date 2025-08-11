@@ -1,84 +1,83 @@
-# Hybrid Search with Qdrant
+# Hybrid Search with ColBERT Reranking: A Performance Comparison
 
-A complete hybrid search implementation using Qdrant's Query API with sparse and dense vectors, binary quantization, and ColBERT reranking.
+This project implements and compares two methods for hybrid search with late-interaction (ColBERT) reranking in Qdrant. The goal is to evaluate the trade-offs between indexing speed and query speed.
 
-## Overview
+## Core Concept: Two Reranking Approaches
 
-This project implements a hybrid search system that combines:
-- **Sparse vectors** (BM25) for keyword matching
-- **Dense vectors** (sentence-transformers) for semantic similarity
-- **Late interaction reranking** (ColBERT) for improved results
-- **Binary quantization** for efficient storage
+The implementation compares two distinct approaches to integrating a ColBERT reranker:
 
-## Architecture
+1.  **Native Reranking (`reranking-search` collection)**
+    *   **Indexing**: Pre-computes and uploads all embeddings: dense, sparse, and the ColBERT late-interaction multi-vectors.
+    *   **Querying**: Uses a single Qdrant `query` API call. Qdrant handles the initial hybrid search and the final ColBERT reranking internally.
 
-```
-┌─────────────────┐    ┌─────────────────┐
-│   Qdrant Node 1 │    │   Qdrant Node 2 │
-│   Port: 6333    │◄──►│   Port: 6337    │
-│   Shards: 1-2   │    │   Shards: 2-3   │
-└─────────────────┘    └─────────────────┘
-         │                       │
-         └───────────────────────┘
-                    │
-         ┌─────────────────┐
-         │  Python Client  │
-         │  Hybrid Search  │
-         │  + ColBERT      │
-         └─────────────────┘
-```
+2.  **Manual Reranking (`hybrid-search` collection)**
+    *   **Indexing**: Pre-computes and uploads only the dense and sparse embeddings.
+    *   **Querying**:
+        1.  Retrieves candidate documents from Qdrant using a standard hybrid search (dense + sparse).
+        2.  The Python client then applies the ColBERT model to rerank these candidates.
 
-## Prerequisites
+## Performance Trade-Off
 
-- Python 3.8+
-- Docker & Docker Compose
-- 2GB+ available space
+The primary difference between the two approaches is a trade-off between indexing and query performance.
 
-## Quick Start
+| Approach         | Indexing Speed (per 1M docs) | Query Speed (per query) |
+| ---------------- | ---------------------------- | ----------------------- |
+| **Native**       | 39 hours (~0.14s / doc)      | **~0.09 seconds**       |
+| **Manual**       | **~~19 hours (~0.07s / doc)** | ~0.9 seconds            |
 
-### 1. Setup Environment
+**Conclusion:** This project proceeds with the **Manual Reranking** approach. The task did not specify query performance requirements, and a 2x faster indexing time was prioritized.
+
+## System Components
+
+*   **Dense Vectors**: `sentence-transformers/all-MiniLM-L6-v2` (384d) with Binary Quantization.
+*   **Sparse Vectors**: `Qdrant/bm25` for keyword scoring.
+*   **Reranking Model**: `answerdotai/answerai-colbert-small-v1` (late interaction).
+*   **Dataset**: `AIR-Bench/qa_msmarco_en` (1M documents).
+*   **Qdrant Cluster**: 2 nodes, 3 shards, replication factor of 2.
+
+## How to Run
+
+### 1. Prerequisites
+
+*   Python 3.8+
+*   Docker & Docker Compose
+
+### 2. Setup Environment
 
 ```bash
-# Clone repository
+# Clone the repository
 git clone https://github.com/holyMolyTolli/qdrant-coding-task.git
 cd qdrant-coding-task
 
-# Create virtual environment
+# Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate   # Windows
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Start Qdrant Cluster
+### 3. Start Qdrant Cluster
 
 ```bash
 docker-compose up -d
 ```
 
-Wait for cluster to be ready at http://localhost:6333
+Wait for the cluster to be ready at `http://localhost:6333`.
 
-### 3. Run Application
+### 4. Run the Application
+
+The main script will build both collections, run a comparison, and log the results.
 
 ```bash
-python -m app.hybrid_search_app
+python -m app.main
 ```
 
-## Configuration
+## Code Structure
 
-### Cluster Setup
-- **Nodes**: 2 (peer-to-peer communication)
-- **Shards**: 3 (distributed across nodes)
-- **Replication**: 2x (high availability)
-- **Quantization**: Binary (dense vectors)
-
-### Models
-- **Dense**: `sentence-transformers/all-MiniLM-L6-v2` (384d)
-- **Sparse**: `Qdrant/bm25` (BM25 scoring)
-- **Reranking**: `colbert-ir/colbertv2.0` (late interaction)
-
-### Dataset
-- **Source**: SQuAD (Stanford Question Answering Dataset)
-- **Size**: 100K+ documents (configurable)
+*   `app/main.py`: Main script to build indexes and run the search comparison.
+*   `app/hybrid_search_operations.py`: Contains the core logic for both search approaches:
+    *   `native_hybrid_search_with_reranking()`
+    *   `manual_hybrid_search_with_reranking()`
+*   `app/config.py`: Configuration for models, dataset, and cluster settings.
+*   `docker-compose.yml`: Defines the 2-node Qdrant cluster.

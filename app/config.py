@@ -8,7 +8,7 @@ DATASET_NAME = "AIR-Bench/qa_msmarco_en"
 SUBSET_NAME = "AIR-Bench_24.04"
 SPLIT_NAME = "corpus_default"
 BATCH_SIZE = 128
-MAX_DOCUMENTS = BATCH_SIZE * 10
+MAX_DOCUMENTS = 1000000
 
 DENSE_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 SPARSE_MODEL_NAME = "Qdrant/bm25"

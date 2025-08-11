@@ -36,17 +36,17 @@ def initialize_embedding_models() -> Dict[str, Any]:
     }
 
 
-async def build_reranking_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
+async def build_reranking_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any], max_docs: int):
     await recreate_collection(client, embedding_models, RERANKING_COLLECTION_NAME)
-    await index_docs_to_collection(client, embedding_models, RERANKING_COLLECTION_NAME, batch_size=BATCH_SIZE, max_docs=MAX_DOCUMENTS)
+    await index_docs_to_collection(client, embedding_models, RERANKING_COLLECTION_NAME, batch_size=BATCH_SIZE, max_docs=max_docs)
     await finalize_indexing(client, RERANKING_COLLECTION_NAME)
     logger.info(f"Setup and indexing complete")
 
 
-async def build_hybrid_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):
+async def build_hybrid_search_index(client: AsyncQdrantClient, embedding_models: Dict[str, Any], max_docs: int):
     hybrid_embedding_models = {DENSE_MODEL_NAME: embedding_models[DENSE_MODEL_NAME], SPARSE_MODEL_NAME: embedding_models[SPARSE_MODEL_NAME]}
     await recreate_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME)
-    await index_docs_to_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME, batch_size=BATCH_SIZE, max_docs=MAX_DOCUMENTS)
+    await index_docs_to_collection(client, hybrid_embedding_models, HYBRID_COLLECTION_NAME, batch_size=BATCH_SIZE, max_docs=max_docs)
     await finalize_indexing(client, HYBRID_COLLECTION_NAME)
     logger.info("Setup and indexing complete")
 
@@ -128,9 +128,12 @@ async def main():
     client = AsyncQdrantClient(url=f"http://{HOST}:{PORT}", timeout=600, prefer_grpc=True)
     embedding_models = initialize_embedding_models()
 
-    await build_reranking_search_index(client, embedding_models)
-    await build_hybrid_search_index(client, embedding_models)
+    await build_reranking_search_index(client, embedding_models, max_docs=1280)
+    await build_hybrid_search_index(client, embedding_models, max_docs=1280)
     await search_and_compare(client, embedding_models)
+
+    # based on the previous performance check I go with the hybrid search index and manual search
+    await build_hybrid_search_index(client, embedding_models, max_docs=MAX_DOCUMENTS)
 
 
 if __name__ == "__main__":
