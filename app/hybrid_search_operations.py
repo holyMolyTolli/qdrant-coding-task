@@ -105,17 +105,13 @@ async def index_docs_to_collection(client: AsyncQdrantClient, embedding_models: 
         upload_duration += time.time() - start_time
 
         document_count += len(batch_docs)
-        if i % 10 == 0:
-            total_duration = time.time() - overall_start_time
-            logger.info(
-                f"Uploaded {document_count} documents to {collection_name} in {total_duration:.2f} seconds ({total_duration/document_count:.2f} seconds per document)"
-            )
 
     total_duration = time.time() - overall_start_time
     logger.info(
         f"✅ Final result: uploaded {document_count} documents to {collection_name} in {total_duration:.2f} seconds ({total_duration/document_count:.2f} seconds per document)"
     )
-    logger.info(f"Embedding: {embedding_duration:.2f} seconds, Upload: {upload_duration:.2f} seconds")
+    logger.info(f"    - Embedding: {embedding_duration:.2f} seconds")
+    logger.info(f"    - Upload: {upload_duration:.2f} seconds")
 
 
 async def finalize_indexing(client: AsyncQdrantClient, collection_name: str):

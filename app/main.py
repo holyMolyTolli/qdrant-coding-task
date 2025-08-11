@@ -52,7 +52,6 @@ async def build_hybrid_search_index(client: AsyncQdrantClient, embedding_models:
 
 
 def _log_search_results(title: str, results: List[Dict[str, Any]], search_time: float):
-    """Logs the title, time, and formatted results of a search."""
     logger.info(f"\n--- {title} (took {search_time:.3f}s) ---")
     if not results:
         logger.info("  No results found.")
@@ -60,11 +59,10 @@ def _log_search_results(title: str, results: List[Dict[str, Any]], search_time: 
     for i, result in enumerate(results, 1):
         score = result.get("score", 0.0)
         text = result.get("payload", {}).get("text", "N/A")
-        logger.info(f"  {i}. Score: {score:<6.4f} | Text: {text}")
+        logger.info(f"  {i}. Score: {score:<6.4f} | Text: {text[:100]}...")
 
 
 def _log_summary(total_native_search_time: float, total_manual_search_time: float, non_matching_results: List[Dict], query_count: int):
-    """Logs the final summary report comparing the two search methods."""
     logger.info("=" * 60)
     logger.info("📊 FINAL SUMMARY")
     logger.info("=" * 60)
@@ -132,7 +130,7 @@ async def main():
     await build_hybrid_search_index(client, embedding_models, max_docs=1280)
     await search_and_compare(client, embedding_models)
 
-    # based on the previous performance check I go with the hybrid search index and manual search
+    # Based on the previous performance check I go with the hybrid search index and manual reranking
     await build_hybrid_search_index(client, embedding_models, max_docs=MAX_DOCUMENTS)
 
 
