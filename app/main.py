@@ -62,9 +62,8 @@ def _log_search_results(title: str, results: List[Dict[str, Any]], search_time: 
         return
     for i, result in enumerate(results, 1):
         score = result.get("score", 0.0)
-        question = result.get("payload", {}).get("question", "N/A")
-        result.get("payload", {}).get("answer", "N/A")
-        logger.info(f"  {i}. Score: {score:<6.4f} | Q: {question}")
+        text = result.get("payload", {}).get("text", "N/A")
+        logger.info(f"  {i}. Score: {score:<6.4f} | Text: {text}")
 
 
 def _log_summary(total_native_search_time: float, total_manual_search_time: float, non_matching_results: List[Dict], query_count: int):
@@ -91,8 +90,8 @@ def _log_summary(total_native_search_time: float, total_manual_search_time: floa
             logger.info(f"Query: '{current_query}'")
 
         logger.info(f"    - Rank {result['rank']+1}:")
-        logger.info(f"        Native: (ID: {result['native_results']['id']}) {result['native_results']['payload']['question']}")
-        logger.info(f"        Manual: (ID: {result['manual_results']['id']}) {result['manual_results']['payload']['question']}")
+        logger.info(f"        Native: (ID: {result['native_results']['id']}) {result['native_results']['payload']['text']}")
+        logger.info(f"        Manual: (ID: {result['manual_results']['id']}) {result['manual_results']['payload']['text']}")
 
 
 async def search_and_compare(client: AsyncQdrantClient, embedding_models: Dict[str, Any]):

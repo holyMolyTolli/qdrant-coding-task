@@ -16,9 +16,9 @@ from qdrant_client.models import (BinaryQuantization, BinaryQuantizationConfig,
                                   VectorParams)
 from tqdm.asyncio import tqdm
 
-from app.config import (DATASET_NAME, DENSE_MODEL_NAME, HNSW_M,
+from app.config import (DATASET_NAME, DENSE_MODEL_NAME, HNSW_M, N_CPU,
                         REPLICATION_FACTOR, RERANKING_MODEL_NAME, SHARD_NUMBER,
-                        SPARSE_MODEL_NAME)
+                        SPARSE_MODEL_NAME, SPLIT_NAME, SUBSET_NAME)
 
 logger = logging.getLogger(__file__.split("/")[-1].split(".")[0])
 logger.setLevel(logging.INFO)
@@ -56,14 +56,14 @@ async def recreate_collection(client: AsyncQdrantClient, embedding_models: Dict[
 
 
 def stream_and_prep_documents(max_docs: int) -> Generator[Dict[str, Any], None, None]:
-    logger.info(f"Loading and streaming dataset '{DATASET_NAME}'...")
-    dataset = load_dataset(DATASET_NAME, split="train", streaming=True)
+    dataset = load_dataset(DATASET_NAME, name=SUBSET_NAME, split=SPLIT_NAME, streaming=True)
 
     for i, example in enumerate(islice(dataset, max_docs)):
-        answer_text = " | ".join(example.get("answers", {}).get("text", [""]))
-        text_content = f"Question: {example['question']} Answer: {answer_text}"
-
-        yield {"id": i, "text": text_content, "metadata": {"question": example["question"], "answer": answer_text, "dataset": DATASET_NAME}}
+        yield {
+            "id": i,
+            "text": example["text"],
+            "metadata": {"dataset": DATASET_NAME, "subset": SUBSET_NAME, "split": SPLIT_NAME, "id": example["id"]},
+        }
 
 
 def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dict[str, Any]], None, None]:
@@ -73,16 +73,19 @@ def batch_generator(generator: Generator, batch_size: int) -> Generator[List[Dic
 
 async def index_docs_to_collection(client: AsyncQdrantClient, embedding_models: Dict[str, Any], collection_name: str, batch_size: int, max_docs: int):
     overall_start_time = time.time()
+    logger.info(f"Streaming dataset '{DATASET_NAME}'...")
     document_stream = stream_and_prep_documents(max_docs)
     batches = batch_generator(document_stream, batch_size)
     num_batches = (max_docs + batch_size - 1) // batch_size
 
-    for batch_docs in tqdm(batches, total=int(num_batches), desc="Indexing Batches"):
+    document_count = 0
+    embedding_duration = 0
+    upload_duration = 0
+    for i, batch_docs in enumerate(tqdm(batches, total=int(num_batches), desc="Indexing Batches")):
         texts_to_embed = [doc["text"] for doc in batch_docs]
-
         start_time = time.time()
         embeddings = {model_name: list(embedding_model.embed(texts_to_embed, parallel=0)) for model_name, embedding_model in embedding_models.items()}
-        logger.info(f"Embedding time: {time.time() - start_time:.2f} seconds")
+        embedding_duration += time.time() - start_time
 
         points_to_upload = []
         for i, doc in enumerate(batch_docs):
@@ -98,13 +101,21 @@ async def index_docs_to_collection(client: AsyncQdrantClient, embedding_models: 
             )
 
         start_time = time.time()
-        client.upload_points(collection_name=collection_name, points=points_to_upload, wait=False, parallel=8, batch_size=batch_size)
-        logger.info(f"Upload time: {time.time() - start_time:.2f} seconds")
+        client.upload_points(collection_name=collection_name, points=points_to_upload, wait=False, parallel=N_CPU, batch_size=batch_size)
+        upload_duration += time.time() - start_time
+
+        document_count += len(batch_docs)
+        if i % 10 == 0:
+            total_duration = time.time() - overall_start_time
+            logger.info(
+                f"Uploaded {document_count} documents to {collection_name} in {total_duration:.2f} seconds ({total_duration/document_count:.2f} seconds per document)"
+            )
 
     total_duration = time.time() - overall_start_time
     logger.info(
-        f"✅ Successfully uploaded {max_docs} to {collection_name} in {total_duration:.2f} seconds ({total_duration/max_docs:.2f} seconds per document)"
+        f"✅ Final result: uploaded {document_count} documents to {collection_name} in {total_duration:.2f} seconds ({total_duration/document_count:.2f} seconds per document)"
     )
+    logger.info(f"Embedding: {embedding_duration:.2f} seconds, Upload: {upload_duration:.2f} seconds")
 
 
 async def finalize_indexing(client: AsyncQdrantClient, collection_name: str):
