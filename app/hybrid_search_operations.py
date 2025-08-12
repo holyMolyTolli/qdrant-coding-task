@@ -162,7 +162,6 @@ def _rerank_candidates(candidates: List[Dict[str, Any]], query_text: str, rerank
 async def hybrid_search_with_manual_reranking(
     query_text: str, embedding_models: Dict[str, Any], client: AsyncQdrantClient, collection_name: str, limit: int, prefetch_limit: int
 ):
-
     # Manually replicating the logic from `hybrid_search_with_native_reranking` to reproduce its results.
     # To simulate its `prefetch`, we fetch candidates from separate dense and sparse searches and combine them into a unique list.
     # This two-stage approach is intentionally different from a single-stage `FusionQuery` (RRF).

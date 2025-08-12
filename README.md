@@ -22,8 +22,8 @@ The primary difference between the two approaches is a trade-off between indexin
 
 | Approach         | Indexing Speed (per 1M docs) | Query Speed (per query) |
 | ---------------- | ---------------------------- | ----------------------- |
-| **Native**       | 39 hours (~0.14s / doc)      | **~0.06 seconds**       |
-| **Manual**       | **~~19 hours (~0.07s / doc)** | ~0.75 seconds            |
+| **Native**       | ~39 hours (~0.14s / doc)      | **~0.06 seconds**       |
+| **Manual**       | **~19 hours (~0.07s / doc)** | ~0.75 seconds            |
 
 **Conclusion:** This project proceeds with the **Manual Reranking** approach. The task did not specify query performance requirements, and a 2x faster indexing time was prioritized.
 
